@@ -786,7 +786,8 @@
             ${BoolField({ label: "Penalize repetition of newlines", name: "penalize_nl", value: params.value.penalize_nl })}
             ${IntField({ label: "Top-K sampling", max: 100, min: -1, name: "top_k", value: params.value.top_k })}
             ${FloatField({ label: "Top-P sampling", max: 1.0, min: 0.0, name: "top_p", step: 0.01, value: params.value.top_p })}
-            ${FloatField({ label: "Min-P sampling", max: 1.0, min: 0.0, name: "min_p", step: 0.01, value: params.value.min_p })}
+            ${FloatField({ label: "Min-P samplink", max: 1.0, min: 0.0, name: "min_p", step: 0.01, value: params.value.min_p })}
+            ${BoolField({ label: "Entropix", name: "entropix", value: params.value.entropix })}
           </fieldset>
           <details>
             <summary>More options</summary>

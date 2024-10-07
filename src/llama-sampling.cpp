@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <iostream>
 #include <numeric>
 #include <random>
 #include <unordered_map>
@@ -1704,4 +1705,196 @@ void llama_perf_sampler_reset(struct llama_sampler * chain) {
     auto * ctx = (struct llama_sampler_chain *) chain->ctx;
 
     ctx->t_sample_us = ctx->n_sample = 0;
+}
+
+// Entropix sampler
+
+struct llama_sampler_entropix {
+    const float temperature;
+    const float top_p;
+    const int32_t top_k;
+    const float LN_2;
+
+    std::mt19937 rng;
+};
+
+static const char * llama_sampler_entropix_name(const struct llama_sampler * /*smpl*/) {
+    return "entropix";
+}
+
+static void calculate_varentropy_logsoftmax(const llama_token_data_array * cur_p, float & entropy, float & varentropy) {
+    const float LN_2 = 0.69314718056f;
+
+    float max_logit = -FLT_MAX;
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        max_logit = std::max(max_logit, cur_p->data[i].logit);
+    }
+
+    float sum = 0.0f;
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        sum += expf(cur_p->data[i].logit - max_logit);
+    }
+
+    float log_sum = logf(sum);
+
+    entropy = 0.0f;
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        float log_prob = cur_p->data[i].logit - max_logit - log_sum;
+        float prob = expf(log_prob);
+        entropy -= prob * log_prob;
+    }
+    entropy /= LN_2;
+
+    varentropy = 0.0f;
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        float log_prob = cur_p->data[i].logit - max_logit - log_sum;
+        float prob = expf(log_prob);
+        varentropy += prob * powf(log_prob / LN_2 + entropy, 2);
+    }
+}
+
+static void llama_sampler_entropix_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (llama_sampler_entropix *) smpl->ctx;
+
+    float entropy, varentropy;
+    calculate_varentropy_logsoftmax(cur_p, entropy, varentropy);
+
+    // Low Entropy, Low Varentropy: "flowing with unspoken intent"
+    if (entropy < 0.1f && varentropy < 0.1f) {
+        // std::cout << "(ll)" << std::endl;
+        size_t max_idx = 0;
+        float max_logit = cur_p->data[0].logit;
+        for (size_t i = 1; i < cur_p->size; ++i) {
+            if (cur_p->data[i].logit > max_logit) {
+                max_logit = cur_p->data[i].logit;
+                max_idx = i;
+            }
+        }
+        cur_p->selected = max_idx;
+        return;
+    }
+
+    // High Entropy, Low Varentropy: "treading carefully, asking clarifying questions"
+    if (entropy > 5.0f && varentropy < 0.1f) {
+        // std::cout << "(hl)" << std::endl;
+        // TODO: Implement clarifying question logic
+        // For now, we'll just increase the temperature slightly
+        float temp = std::min(1.3f, ctx->temperature * 1.5f);
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            cur_p->data[i].logit /= temp;
+        }
+    }
+    // Low Entropy, High Varentropy: "exploring forks in the path"
+    else if (entropy < 5.0f && varentropy > 5.0f) {
+        // std::cout << "(lh)" << std::endl;
+        float temp = std::min(1.2f, ctx->temperature * 1.5f);
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            cur_p->data[i].logit /= temp;
+        }
+    }
+    // High Entropy, High Varentropy: "resampling in the mist"
+    else if (entropy > 5.0f && varentropy > 5.0f) {
+        // std::cout << "(hh)" << std::endl;
+        float temp = std::max(2.0f, ctx->temperature * 3.0f);
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            cur_p->data[i].logit /= temp;
+        }
+    }
+    // Middle ground: smooth transition
+    else {
+        // std::cout << "(..)" << std::endl;
+        float t = std::clamp((entropy + varentropy) / 10.0f, 0.5f, 2.0f);
+        float temp = t * ctx->temperature;
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            cur_p->data[i].logit /= temp;
+        }
+    }
+
+    // Apply top-k
+    if (ctx->top_k > 0 && (size_t)ctx->top_k < cur_p->size) {
+        std::partial_sort(cur_p->data, cur_p->data + ctx->top_k, cur_p->data + cur_p->size,
+            [](const llama_token_data & a, const llama_token_data & b) {
+                return a.logit > b.logit;
+            });
+        cur_p->size = ctx->top_k;
+    }
+
+    // Apply top-p
+    if (ctx->top_p < 1.0f) {
+        std::sort(cur_p->data, cur_p->data + cur_p->size,
+            [](const llama_token_data & a, const llama_token_data & b) {
+                return a.logit > b.logit;
+            });
+
+        float cumsum = 0.0f;
+        size_t last_idx = cur_p->size - 1;
+
+        for (size_t i = 0; i < cur_p->size; i++) {
+            float p = expf(cur_p->data[i].logit);
+            cumsum += p;
+            if (cumsum > ctx->top_p) {
+                last_idx = i;
+                break;
+            }
+        }
+
+        cumsum = 0.0f;
+        for (size_t i = 0; i <= last_idx; i++) {
+            float p = expf(cur_p->data[i].logit);
+            cumsum += p;
+        }
+
+        for (size_t i = 0; i <= last_idx; i++) {
+            cur_p->data[i].p = expf(cur_p->data[i].logit) / cumsum;
+        }
+
+        cur_p->size = last_idx + 1;
+    } else {
+        float sum = 0.0f;
+        for (size_t i = 0; i < cur_p->size; i++) {
+            float p = expf(cur_p->data[i].logit);
+            sum += p;
+        }
+        for (size_t i = 0; i < cur_p->size; i++) {
+            cur_p->data[i].p = expf(cur_p->data[i].logit) / sum;
+        }
+    }
+
+    // Sample from the distribution
+    std::discrete_distribution<> dist(cur_p->size, 0, 1, [&](size_t i) { return cur_p->data[i].p; });
+    int idx = dist(ctx->rng);
+    cur_p->selected = idx;
+}
+
+struct llama_sampler * llama_sampler_init_entropix(float temperature, float top_p, int32_t top_k);
+
+static struct llama_sampler * llama_sampler_entropix_clone(const struct llama_sampler * smpl) {
+    const auto * ctx = (const llama_sampler_entropix *) smpl->ctx;
+    return llama_sampler_init_entropix(ctx->temperature, ctx->top_p, ctx->top_k);
+}
+
+static void llama_sampler_entropix_free(struct llama_sampler * smpl) {
+    delete (llama_sampler_entropix *) smpl->ctx;
+}
+
+static struct llama_sampler_i llama_sampler_entropix_i = {
+    /* .name   = */ llama_sampler_entropix_name,
+    /* .accept = */ nullptr,
+    /* .apply  = */ llama_sampler_entropix_apply,
+    /* .reset  = */ nullptr,
+    /* .clone  = */ llama_sampler_entropix_clone,
+    /* .free   = */ llama_sampler_entropix_free,
+};
+
+struct llama_sampler * llama_sampler_init_entropix(float temperature, float top_p, int32_t top_k) {
+    return new llama_sampler {
+        /* .iface = */ &llama_sampler_entropix_i,
+        /* .ctx   = */ new llama_sampler_entropix {
+            /* .temperature = */ temperature,
+            /* .top_p       = */ top_p,
+            /* .top_k       = */ top_k,
+            /* .LN_2        = */ 0.69314718056f,
+            /* .rng         = */ std::mt19937(std::random_device()()),
+        },
+    };
 }

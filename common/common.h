@@ -120,6 +120,7 @@ struct gpt_sampler_params {
     int32_t mirostat          = 0;     // 0 = disabled, 1 = mirostat, 2 = mirostat 2.0
     float   mirostat_tau      = 5.00f; // target entropy
     float   mirostat_eta      = 0.10f; // learning rate
+    bool    entropix          = false; // enable entropix sampler
     bool    penalize_nl       = false; // consider newlines as a repeatable token
     bool    ignore_eos        = false;
     bool    no_perf           = false; // disable performance metrics

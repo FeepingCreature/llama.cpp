@@ -131,10 +131,10 @@ std::string gpt_sampler_params::print() const {
     snprintf(result, sizeof(result),
             "\trepeat_last_n = %d, repeat_penalty = %.3f, frequency_penalty = %.3f, presence_penalty = %.3f\n"
             "\ttop_k = %d, tfs_z = %.3f, top_p = %.3f, min_p = %.3f, typical_p = %.3f, temp = %.3f\n"
-            "\tmirostat = %d, mirostat_lr = %.3f, mirostat_ent = %.3f",
+            "\tmirostat = %d, mirostat_lr = %.3f, mirostat_ent = %.3f, entropix = %i",
             penalty_last_n, penalty_repeat, penalty_freq, penalty_present,
             top_k, tfs_z, top_p, min_p, typ_p, temp,
-            mirostat, mirostat_eta, mirostat_tau);
+            mirostat, mirostat_eta, mirostat_tau, entropix);
 
     return std::string(result);
 }
@@ -171,7 +171,9 @@ struct gpt_sampler * gpt_sampler_init(const struct llama_model * model, const st
                 params.penalize_nl,
                 params.ignore_eos));
 
-    if (params.temp > 0.0f) {
+    if (params.entropix) {
+        llama_sampler_chain_add(result->chain, llama_sampler_init_entropix(params.temp, params.top_p, params.top_k));
+    } else if (params.temp > 0.0f) {
         if (params.mirostat == 0) {
             for (const auto & cnstr : params.samplers) {
                 switch (cnstr) {
